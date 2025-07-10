@@ -1,0 +1,257 @@
+import cv2
+import time
+import numpy as np
+from collections import deque
+from ultralytics import YOLO
+from court_module import CourtNetModule
+from shuttle_utils import load_polygon, point_inside_polygon, load_mid_kps, load_keypoints, plot_half_court_polygons
+from deep_sort_realtime.deepsort_tracker import DeepSort
+from kalman6D import KalmanFilter
+from net_utils import load_net_keypoints, net_touch_event
+
+# === Config ===
+video_path = r"X:\Projects\BadmintonDL\videos\match5.mp4"
+court_model_path = r"X:\Projects\thread\out_COURT_kprcnn_combined\model_final.pth"
+net_model_path = r"X:\Projects\thread\out_NET_kprcnn_combined\model_final.pth"
+yolo_model_path = r"X:\Users\Thunder\runs\yolov8l_badminton_1280\weights\best.pt"
+polygon_path = r"X:\Projects\thread\Research\output\court_polygon.json"
+net_polygon_path = r"X:\Projects\thread\Research\output\net_polygon.json"
+
+output_res = (1280, 720)
+
+# === Initialize models ===
+court_net = CourtNetModule(court_model_path, net_model_path)
+yolo = YOLO(yolo_model_path)
+tracker = DeepSort(max_age=30)
+kf = KalmanFilter(fps=30)
+
+cap = cv2.VideoCapture(video_path)
+fps = cap.get(cv2.CAP_PROP_FPS)
+frame_idx = 0
+
+mode = None
+detect_interval = 10
+last_detect_time = -10
+
+# === Rally and rest detection variables ===
+rally_start_time = None
+no_detect_count = 0
+rally_active = False
+last_status = None
+
+# === Shuttle rest detection queue ===
+shuttle_positions = deque(maxlen=8)  # 8 frames window
+rest_threshold = 10  # pixels
+
+# === Player Scores ===
+player1_score = 0
+player2_score = 0
+
+# === Load net keypoints once ===
+net_keypoints = load_net_keypoints(net_polygon_path)
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    frame_resized = cv2.resize(frame, output_res)
+    elapsed_sec = frame_idx / fps
+
+    # === YOLO detection ===
+    results = yolo(frame_resized)
+    persons = [b for b in results[0].boxes if int(b.cls[0]) == 0]
+    shuttles = [b for b in results[0].boxes if int(b.cls[0]) == 1]
+
+    # === Determine singles/doubles mode ===
+    if mode is None:
+        mode = "singles" if len(persons) <= 2 else "doubles"
+        print(f"[INFO] Mode: {mode}")
+
+    # === RCNN court + net detection every detect_interval ===
+    if frame_idx == 0 or (elapsed_sec - last_detect_time >= detect_interval):
+        court_net.detect_keypoints(frame_resized, mode=mode)
+        court_net.save_keypoints_json(output_res, output_res, path=polygon_path)
+        court_net.save_net_keypoints_json(output_res, output_res, path=net_polygon_path)
+        last_detect_time = elapsed_sec
+
+    frame_resized = court_net.draw_keypoints(frame_resized, mode=mode)
+    mid_kp1, mid_kp2 = load_mid_kps(polygon_path, mode=mode)
+
+    # === Draw dividing line ===
+    if mid_kp1 and mid_kp2:
+        cv2.line(frame_resized,
+                 (int(mid_kp1[0]), int(mid_kp1[1])),
+                 (int(mid_kp2[0]), int(mid_kp2[1])),
+                 (255, 0, 255), 2)
+
+    # === Deep SORT tracking for players ===
+    dets_for_tracker = []
+    for person in persons:
+        x1, y1, x2, y2 = map(int, person.xyxy[0])
+        conf = float(person.conf[0])
+        dets_for_tracker.append(([x1, y1, x2 - x1, y2 - y1], conf, 'person'))
+
+    tracks = tracker.update_tracks(dets_for_tracker, frame=frame_resized)
+
+    players = []
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
+        track_id = track.track_id
+        l, t, r, b = track.to_ltrb()
+        bottom_y = int(b)
+        players.append((track_id, l, t, r, b, bottom_y))
+
+    players_sorted = sorted(players, key=lambda x: x[5], reverse=True)
+
+    # === Draw player/team IDs ===
+    if mode == "singles" and len(players_sorted) >= 2:
+        p1, p2 = players_sorted[0], players_sorted[1]
+        for idx, p, color, label in [(1,p1,(255,0,0),"Player1"), (2,p2,(0,255,255),"Player2")]:
+            tid, l, t, r, b, _ = p
+            cv2.rectangle(frame_resized, (int(l), int(t)), (int(r), int(b)), color, 2)
+            cv2.putText(frame_resized, label, (int(l), int(t)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+    elif mode == "doubles" and len(players_sorted) >= 4:
+        team1 = players_sorted[:2]  # nearer
+        team2 = players_sorted[2:]  # farther
+
+        for i, p in enumerate(team1, start=1):
+            tid, l, t, r, b, _ = p
+            cv2.rectangle(frame_resized, (int(l), int(t)), (int(r), int(b)), (255,0,0), 2)
+            cv2.putText(frame_resized, f"Team1_P{i}", (int(l), int(t)-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,0,0), 2)
+
+        for i, p in enumerate(team2, start=1):
+            tid, l, t, r, b, _ = p
+            cv2.rectangle(frame_resized, (int(l), int(t)), (int(r), int(b)), (0,255,255), 2)
+            cv2.putText(frame_resized, f"Team2_P{i}", (int(l), int(t)-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+
+    # === Shuttle detection and Kalman Filter ===
+    keypoints = load_keypoints(polygon_path)
+
+    if shuttles:
+        no_detect_count = 0
+        if not rally_active:
+            rally_active = True
+            rally_start_time = time.time()
+            last_status = None
+            shuttle_positions.clear()
+
+        shuttle = shuttles[0]
+        x1, y1, x2, y2 = map(int, shuttle.xyxy[0])
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+        kf.step([cx, cy])
+        cx_filt, cy_filt = kf.S[0], kf.S[3]
+
+        # === Net Touch Detection ===
+        if net_touch_event((cx_filt, cy_filt), net_keypoints, y_thresh=10):
+            cv2.putText(frame_resized, "Net Touch Detected!", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+            print(f"[INFO] Net touch detected at ({cx_filt:.1f}, {cy_filt:.1f})")
+
+        # === Define half-court polygons ===
+        if mode == "singles" and len(keypoints) >= 6:
+            player1_poly = np.array([keypoints[i] for i in [0,1,5,4,0]], dtype=np.int32)
+            player2_poly = np.array([keypoints[i] for i in [4,5,3,2,4]], dtype=np.int32)
+        elif mode == "doubles" and len(keypoints) >= 6:
+            bottom_half = np.array([keypoints[i] for i in [0,1,5,4,0]], dtype=np.int32)
+            top_half = np.array([keypoints[i] for i in [4,5,3,2,4]], dtype=np.int32)
+
+            if bottom_half[:,1].mean() > top_half[:,1].mean():
+                team1_poly = bottom_half
+                team2_poly = top_half
+            else:
+                team1_poly = top_half
+                team2_poly = bottom_half
+
+        else:
+            player1_poly = player2_poly = None
+
+        # === Determine shuttle side ===
+        if mode == "singles":
+            if point_inside_polygon((cx_filt, cy_filt), player1_poly):
+                shuttle_color = (255, 0, 0)
+                side_status = "Player 1 side"
+            elif point_inside_polygon((cx_filt, cy_filt), player2_poly):
+                shuttle_color = (0, 255, 255)
+                side_status = "Player 2 side"
+            else:
+                shuttle_color = (0, 0, 255)
+                side_status = "Outside court halves"
+        else:
+            if point_inside_polygon((cx_filt, cy_filt), team1_poly):
+                shuttle_color = (255, 0, 0)
+                side_status = "Team 1 side"
+            elif point_inside_polygon((cx_filt, cy_filt), team2_poly):
+                shuttle_color = (0, 255, 255)
+                side_status = "Team 2 side"
+            else:
+                shuttle_color = (0, 0, 255)
+                side_status = "Outside court halves"
+
+        cv2.rectangle(frame_resized, (x1, y1), (x2, y2), shuttle_color, 2)
+        cv2.circle(frame_resized, (int(cx_filt), int(cy_filt)), 5, shuttle_color, -1)
+        cv2.putText(frame_resized, side_status, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, shuttle_color, 2)
+
+        # === Shuttle Rest Detection & Scoring ===
+        shuttle_positions.append((cx_filt, cy_filt))
+        if len(shuttle_positions) == shuttle_positions.maxlen:
+            positions_list = list(shuttle_positions)
+            max_dist = max(
+                np.linalg.norm(np.array(p1) - np.array(p2))
+                for i, p1 in enumerate(positions_list)
+                for p2 in positions_list[i+1:]
+            )
+            if max_dist < rest_threshold:
+                cv2.putText(frame_resized, "Shuttle Resting", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+                print(f"[INFO] Shuttle at rest detected (max dist {max_dist:.2f}px).")
+
+                # === Scoring Logic ===
+                if side_status == "Player 1 side":
+                    player2_score += 1
+                    print("[SCORE] Player 2 scores a point!")
+                elif side_status == "Player 2 side":
+                    player1_score += 1
+                    print("[SCORE] Player 1 scores a point!")
+
+                rally_active = False
+                last_status = side_status
+                print(f"[INFO] Rally ended ({side_status}). Duration: {time.time() - rally_start_time:.2f}s")
+                rally_start_time = None
+                shuttle_positions.clear()
+
+    else:
+        kf.step([None, None])
+        no_detect_count += 1
+        if no_detect_count >= 7 and rally_active:
+            rally_active = False
+            print(f"[INFO] Rally ended (shuttle lost). Duration: {time.time() - rally_start_time:.2f}s")
+            rally_start_time = None
+            last_status = None
+            shuttle_positions.clear()
+
+    # === Display rally status ===
+    if rally_active and rally_start_time is not None:
+        rally_time = time.time() - rally_start_time
+        cv2.putText(frame_resized, f"Rally Time: {rally_time:.2f}s", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+    else:
+        text = "Rally Over"
+        if last_status is not None:
+            text += f" ({last_status})"
+        cv2.putText(frame_resized, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    # === Display scoreboard ===
+    cv2.putText(frame_resized, f"P2: {player2_score}", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,255), 3)
+    cv2.putText(frame_resized, f"P1: {player1_score}", (20, output_res[1]-20), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,0,0), 3)
+
+    cv2.imshow("Badminton Pipeline with Deep SORT + Net Touch Detection", frame_resized)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+    frame_idx += 1
+
+cap.release()
+cv2.destroyAllWindows()

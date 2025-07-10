@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.ipynb_checkpoints
+
+# Virtual environments
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Model weights and checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# Data and outputs
+output/
+video_outputs/
+*.json
+
+# Logs and cache
+*.log
+.cache/
+*.bak
+
+# Hugging Face cache
+huggingface/
+
+# Test or debug files
+test_*.py
+debug_*.py
+
+# Environment files
+*.env
+
+# Jupyter Notebook temporary
+.ipynb_checkpoints/

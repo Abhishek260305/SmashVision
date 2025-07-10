@@ -1,0 +1,59 @@
+Folder PATH listing for volume WD Black
+Volume serial number is A025-4BAF
+X:.
+¦   court_module.py
+¦   deep_sort_module.py
+¦   folder_structure.txt
+¦   kalman6D.py
+¦   main.py
+¦   main.txt
+¦   net_utils.py
+¦   player_assignment.py
+¦   player_detector.py
+¦   README.md
+¦   requirements.txt
+¦   requirements_mac.txt
+¦   shuttle_utils.py
+¦   
++---Models
+¦   +---COURT(kprcnn)
+¦   ¦       model_final.pth
+¦   ¦       
+¦   +---Mask(court+net)
+¦   ¦       model_final.pth
+¦   ¦       
+¦   +---NET(kprcnn)
+¦   ¦       model_final.pth
+¦   ¦       
+¦   +---YOLO(person+shuttle)
+¦           best.pt
+¦           
++---output
+¦       courtDebug.py
+¦       court_polygon.json
+¦       net_debug.py
+¦       net_polygon.json
+¦       
++---video_outputs
+¦       test1_output.mp4
+¦       test2_output.mp4
+¦       test3_output.mp4
+¦       test5_output.mp4
+¦       testCase1_output.mp4
+¦       testCase2_output.mp4
+¦       testCase3_output.mp4
+¦       testCase5_output.mp4
+¦       testCase6_output.mp4
+¦       testCase6_output_with_speed.mp4
+¦       
++---__pycache__
+        config.cpython-39.pyc
+        court_module.cpython-39.pyc
+        deep_sort_module.cpython-39.pyc
+        kalman6D.cpython-39.pyc
+        net_utils.cpython-39.pyc
+        player_assignment.cpython-39.pyc
+        player_detector.cpython-39.pyc
+        resize_utils.cpython-39.pyc
+        shuttle_utils.cpython-39.pyc
+        
