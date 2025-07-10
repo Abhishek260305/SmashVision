@@ -19,17 +19,17 @@ Download the required model weights before running:
 ### 📁 Models Folder Structure
 
 Place them in your `models/` folder as:
-
+```
 models/
 ├── best.pt
 ├── model_final.pth
 ├── net_kprcnn.pth
 └── mask_rcnn.pth # optional
-
+```
 ## ✨ Features
 
 ✅ **Automated Badminton Scoring**  
-Detects which player wins each point based on shuttle landing position and rally outcome.
+Detects which player wins each point based on the shuttle landing position and the rally outcome.
 
 ✅ **Real-Time Object Detection**  
 Uses YOLOv8 for detecting players, shuttle, and rackets with high accuracy.
